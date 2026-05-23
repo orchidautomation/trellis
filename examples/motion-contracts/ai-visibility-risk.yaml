@@ -1,0 +1,57 @@
+motion_id: ai_visibility_risk_q3
+owner: gtm_engineering
+hypothesis:
+  statement: Enterprise marketing leaders with measurable AI visibility gaps will respond to competitor-risk messaging.
+  segment: Series B-D B2B SaaS
+  persona:
+    - CMO
+    - VP Marketing
+    - Head of SEO
+  trigger: Competitor is cited more often in answer engines.
+systems:
+  research: clay
+  execution: smartlead
+  crm: hubspot
+required_fields:
+  account:
+    - company_domain
+    - industry
+    - ai_visibility_score
+    - competitor_visibility_gap
+  person:
+    - email
+    - title
+    - persona
+  motion:
+    - trigger_event
+    - pain_hypothesis
+    - offer_angle
+    - message_variant
+    - source_list
+variants:
+  - id: competitor_risk
+    description: Lead with competitor visibility gap.
+  - id: traffic_decline
+    description: Lead with traffic shift from search to AI answers.
+success_metrics:
+  primary:
+    - qualified_meeting_booked
+  secondary:
+    - positive_reply
+    - opportunity_created
+guardrails:
+  min_rows_per_variant: 1
+  min_field_coverage: 0.95
+  require_crm_outcome_mapping: true
+agent_permissions:
+  can_read:
+    - approved_context
+    - motion_evidence
+    - lead_metadata
+  can_propose:
+    - next_test
+    - crm_label_update
+  requires_approval:
+    - crm_writeback
+    - message_change
+    - campaign_pause

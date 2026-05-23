@@ -1,0 +1,3 @@
+company_domain,industry,ai_visibility_score,competitor_visibility_gap,email,title,persona,trigger_event,pain_hypothesis,offer_angle,message_variant,source_list
+example.com,B2B SaaS,42,18,maya@example.com,CMO,CMO,Competitor cited 3x more often,Board will ask about AI search visibility,competitor gap,competitor_risk,clay_ai_visibility_gap
+acme.com,B2B SaaS,33,12,ari@acme.com,VP Marketing,VP Marketing,Organic traffic down 14%,Traffic is shifting to AI answers,traffic shift,traffic_decline,clay_ai_visibility_gap

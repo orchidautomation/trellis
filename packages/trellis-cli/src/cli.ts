@@ -7,8 +7,19 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import process from "node:process";
 
-import { runTrellisAttioSmoke, runTrellisSmoke } from "../../gtm/src/index.js";
+import {
+  compileMotionEvidencePack,
+  compileMotionImplementationPack,
+  parseMotionContract,
+  preflightMotionRun,
+  runTrellisAttioSmoke,
+  runTrellisSmoke,
+  validateCandidateRow,
+  type MotionContract,
+  type MotionEvent,
+} from "../../gtm/src/index.js";
 import { buildClaudeCodeMcpConfig, mergeClaudeCodeMcpConfig } from "./mcp-config.js";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 let envLoadedForCwd = new Set<string>();
 
@@ -299,6 +310,9 @@ async function main() {
       case "mcp":
         await handleMcpCommand(arg, cliFlags);
         break;
+      case "motion":
+        await handleMotionCommand(arg, providerArg, cliFlags);
+        break;
       case "init":
         if (typeof cliFlags.kit === "string") {
           rejectUnsupportedCommand("init --kit", "Trellis init emits the default GTM scaffold.");
@@ -334,6 +348,11 @@ function printHelp() {
   npm run trellis -- smoke
   npm run trellis -- smoke attio
   npm run trellis -- deploy
+  npm run trellis -- motion init <motion-id>
+  npm run trellis -- motion validate motions/<motion-id>.yaml
+  npm run trellis -- motion compile motions/<motion-id>.yaml --targets clay,smartlead,hubspot
+  npm run trellis -- motion preflight motions/<motion-id>.yaml --leads ./leads.csv
+  npm run trellis -- motion evidence motions/<motion-id>.yaml --enrollments ./leads.csv --events ./events.csv --outcomes ./outcomes.csv
   npm run trellis -- init <target-dir> [--name my-app]
   npm run trellis -- <command> --json
 
@@ -359,6 +378,7 @@ Simple labels stay short in the CLI: attio, mail, research, browser, agentmail, 
 Init scaffolds the Trellis GTM path by default.
 Trellis manages the default deploy target.
 Business providers are connected after first boot.
+Motion commands are Trellis 2.0 primitives for Motion Contracts, preflight checks, evidence packs, and GTM learning loops.
 Use --json when a plugin or coding agent is orchestrating the setup.`);
 }
 
@@ -459,6 +479,261 @@ current behavior:
 
 async function printLangfuseConnectionGuide() {
   await printCloudflareConnectionGuide(CLOUDFLARE_CONNECTIONS.langfuse);
+}
+
+async function handleMotionCommand(
+  subcommand: string | undefined,
+  motionArg: string | undefined,
+  flags: Record<string, string | boolean>,
+) {
+  switch (subcommand) {
+    case "init":
+      await handleMotionInit(motionArg, flags);
+      return;
+    case "validate":
+      await handleMotionValidate(motionArg);
+      return;
+    case "compile":
+      await handleMotionCompile(motionArg, flags);
+      return;
+    case "validate-row":
+      await handleMotionValidateRow(motionArg, flags);
+      return;
+    case "preflight":
+      await handleMotionPreflight(motionArg, flags);
+      return;
+    case "evidence":
+      await handleMotionEvidence(motionArg, flags);
+      return;
+    default:
+      throw new Error("Unknown motion command. Use: trellis motion init|validate|compile|validate-row|preflight|evidence");
+  }
+}
+
+async function handleMotionInit(motionId: string | undefined, flags: Record<string, string | boolean>) {
+  if (!motionId) {
+    throw new Error("Missing motion id. Example: trellis motion init ai_visibility_risk_q3");
+  }
+
+  const filePath = path.resolve(
+    process.cwd(),
+    typeof flags.output === "string" ? flags.output : path.join("motions", `${motionId}.yaml`),
+  );
+  if (existsSync(filePath) && flags.force !== true) {
+    throw new Error(`${filePath} already exists. Pass --force to overwrite.`);
+  }
+
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const source = stringifyYaml(buildMotionContractTemplate(motionId), {
+    lineWidth: 100,
+  });
+  await writeFile(filePath, source);
+
+  if (jsonOutput) {
+    emitJson({
+      ok: true,
+      command: "motion",
+      subcommand: "init",
+      motionId,
+      filePath,
+      next: [
+        `trellis motion validate ${toPosixPath(path.relative(process.cwd(), filePath))}`,
+        `trellis motion compile ${toPosixPath(path.relative(process.cwd(), filePath))} --targets clay,smartlead,hubspot`,
+      ],
+    });
+    return;
+  }
+
+  console.log(`Created Motion Contract:
+
+  ${filePath}
+
+Next:
+  npm run trellis -- motion validate ${toPosixPath(path.relative(process.cwd(), filePath))}
+  npm run trellis -- motion compile ${toPosixPath(path.relative(process.cwd(), filePath))} --targets clay,smartlead,hubspot`);
+}
+
+async function handleMotionValidate(motionPath: string | undefined) {
+  const { contract, resolvedPath } = await loadMotionContract(motionPath);
+  const parsed = parseMotionContract(contract);
+  const summary = {
+    ok: true,
+    command: "motion",
+    subcommand: "validate",
+    motionPath: resolvedPath,
+    motion_id: parsed.motion_id,
+    variants: parsed.variants.map((variant) => typeof variant === "string" ? variant : variant.id),
+    requiredFieldCount: Object.values(parsed.required_fields ?? {}).flat().length,
+    systems: parsed.systems,
+    success_metrics: parsed.success_metrics,
+  };
+
+  if (jsonOutput) {
+    emitJson(summary);
+    return;
+  }
+
+  console.log(`Motion Contract valid:
+  motion: ${summary.motion_id}
+  variants: ${summary.variants.join(", ")}
+  required fields: ${summary.requiredFieldCount}
+  systems: ${Object.entries(summary.systems ?? {}).map(([key, value]) => `${key}=${value}`).join(", ") || "none"}`);
+}
+
+async function handleMotionCompile(motionPath: string | undefined, flags: Record<string, string | boolean>) {
+  const { contract, resolvedPath } = await loadMotionContract(motionPath);
+  const parsed = parseMotionContract(contract);
+  const outputDir = path.resolve(
+    process.cwd(),
+    typeof flags.output === "string" ? flags.output : path.join("generated", parsed.motion_id),
+  );
+  const baseUrl = typeof flags.baseUrl === "string" ? flags.baseUrl : undefined;
+  const runId = typeof flags.run === "string" ? flags.run : undefined;
+  const pack = compileMotionImplementationPack(parsed, { baseUrl, runId });
+
+  await mkdir(path.join(outputDir, "clay"), { recursive: true });
+  await mkdir(path.join(outputDir, "sequencer"), { recursive: true });
+  await mkdir(path.join(outputDir, "crm"), { recursive: true });
+  await mkdir(path.join(outputDir, "agents"), { recursive: true });
+  await writeFile(path.join(outputDir, "implementation-pack.json"), JSON.stringify(pack, null, 2) + "\n");
+  await writeFile(path.join(outputDir, "launch-checklist.md"), renderMotionLaunchChecklist(pack));
+  await writeFile(path.join(outputDir, "clay", "required-columns.md"), renderRequiredColumnsMarkdown("Clay required columns", pack.clay.required_columns));
+  await writeFile(path.join(outputDir, "clay", "http-api-payload.json"), JSON.stringify(pack.clay.http_api_payload, null, 2) + "\n");
+  await writeFile(path.join(outputDir, "clay", "http-api-endpoint.txt"), `${pack.clay.http_api_endpoint}\n`);
+  await writeFile(path.join(outputDir, "sequencer", "custom-fields.csv"), renderCsv(["field"], pack.sequencer.custom_fields.map((field) => ({ field }))));
+  await writeFile(path.join(outputDir, "crm", "recommended-fields.csv"), renderCsv(["field"], pack.crm.recommended_fields.map((field) => ({ field }))));
+  await writeFile(path.join(outputDir, "agents", "permissions.json"), JSON.stringify(pack.agent_permissions, null, 2) + "\n");
+
+  if (jsonOutput) {
+    emitJson({
+      ok: true,
+      command: "motion",
+      subcommand: "compile",
+      motionPath: resolvedPath,
+      outputDir,
+      pack,
+    });
+    return;
+  }
+
+  console.log(`Compiled Trellis implementation pack:
+
+  motion: ${pack.motion_id}
+  run: ${pack.motion_run_id}
+  output: ${outputDir}
+
+Generated:
+  - implementation-pack.json
+  - launch-checklist.md
+  - clay/required-columns.md
+  - clay/http-api-payload.json
+  - clay/http-api-endpoint.txt
+  - sequencer/custom-fields.csv
+  - crm/recommended-fields.csv
+  - agents/permissions.json`);
+}
+
+async function handleMotionValidateRow(motionPath: string | undefined, flags: Record<string, string | boolean>) {
+  const { contract } = await loadMotionContract(motionPath);
+  const row = await readRowFlag(flags);
+  const result = validateCandidateRow(contract, row, {
+    runId: typeof flags.run === "string" ? flags.run : undefined,
+  });
+
+  if (jsonOutput) {
+    emitJson({
+      ok: result.certified,
+      command: "motion",
+      subcommand: "validate-row",
+      result,
+    });
+    return;
+  }
+
+  console.log(JSON.stringify(result, null, 2));
+}
+
+async function handleMotionPreflight(motionPath: string | undefined, flags: Record<string, string | boolean>) {
+  const { contract } = await loadMotionContract(motionPath);
+  const leadsPath = readFlagString(flags, ["leads", "candidates", "rows"]);
+  if (!leadsPath) {
+    throw new Error("Missing candidate rows. Use --leads ./leads.csv");
+  }
+  const rows = await readRowsFile(leadsPath);
+  const result = preflightMotionRun(contract, rows, {
+    runId: typeof flags.run === "string" ? flags.run : undefined,
+  });
+
+  if (jsonOutput) {
+    emitJson({
+      ok: result.status === "certified",
+      command: "motion",
+      subcommand: "preflight",
+      result,
+    });
+    return;
+  }
+
+  console.log(`Motion preflight: ${result.status.toUpperCase()}
+
+  motion: ${result.motion_id}
+  run: ${result.motion_run_id}
+  candidates: ${result.candidate_count}
+  certified rows: ${result.certified_count}
+  learnability score: ${result.learnability_score}
+
+Blockers:
+${result.blockers.length > 0 ? result.blockers.map((item) => `  - ${item}`).join("\n") : "  none"}
+
+Warnings:
+${result.warnings.length > 0 ? result.warnings.map((item) => `  - ${item}`).join("\n") : "  none"}
+
+Variant counts:
+${Object.entries(result.variant_counts).map(([variant, count]) => `  - ${variant}: ${count}`).join("\n")}`);
+}
+
+async function handleMotionEvidence(motionPath: string | undefined, flags: Record<string, string | boolean>) {
+  const { contract } = await loadMotionContract(motionPath);
+  const enrollmentsPath = readFlagString(flags, ["enrollments", "leads", "candidates"]);
+  if (!enrollmentsPath) {
+    throw new Error("Missing enrollments. Use --enrollments ./leads.csv");
+  }
+  const eventsPath = readFlagString(flags, ["events"]);
+  const outcomesPath = readFlagString(flags, ["outcomes"]);
+  const pack = compileMotionEvidencePack({
+    contract,
+    enrollments: await readRowsFile(enrollmentsPath),
+    events: eventsPath ? await readRowsFile(eventsPath) as MotionEvent[] : [],
+    outcomes: outcomesPath ? await readRowsFile(outcomesPath) as MotionEvent[] : [],
+    runId: typeof flags.run === "string" ? flags.run : undefined,
+  });
+
+  if (jsonOutput) {
+    emitJson({
+      ok: true,
+      command: "motion",
+      subcommand: "evidence",
+      pack,
+    });
+    return;
+  }
+
+  console.log(`Motion evidence pack:
+
+  motion: ${pack.motion_id}
+  run: ${pack.motion_run_id}
+  candidates: ${pack.candidate_count}
+  events: ${pack.event_count}
+  outcomes: ${pack.outcome_count}
+
+Findings:
+${pack.findings.length > 0 ? pack.findings.map((item) => `  - ${item}`).join("\n") : "  none yet"}
+
+Caveats:
+${pack.caveats.length > 0 ? pack.caveats.map((item) => `  - ${item}`).join("\n") : "  none"}
+
+Variant rollups:
+${Object.entries(pack.variant_rollups).map(([variant, rollup]) => `  - ${variant}: enrolled=${rollup.enrolled}, positive_replies=${rollup.positive_replies}, meetings=${rollup.qualified_meetings}, opps=${rollup.opportunities}`).join("\n")}`);
 }
 
 async function handleDocsCommand(subcommand: string | undefined, docsPath: string | undefined) {
@@ -2930,6 +3205,215 @@ function resolveLocalMcpUrl(flags: Record<string, string | boolean>) {
 function resolveRemoteMcpUrl() {
   const appUrl = process.env.TRELLIS_WORKER_URL ?? process.env.APP_URL ?? "https://<app-url>";
   return `${appUrl.replace(/\/$/, "")}/mcp/trellis`;
+}
+
+function buildMotionContractTemplate(motionId: string): MotionContract {
+  return {
+    motion_id: motionId,
+    owner: "gtm_engineering",
+    hypothesis: {
+      statement: "Replace with the GTM hypothesis this motion is meant to test.",
+      segment: "Replace with target account segment",
+      persona: ["Replace with target persona"],
+      trigger: "Replace with trigger/event/pain signal",
+    },
+    systems: {
+      research: "clay",
+      execution: "smartlead",
+      crm: "hubspot",
+    },
+    required_fields: {
+      account: [
+        "company_domain",
+        "industry",
+      ],
+      person: [
+        "email",
+        "title",
+        "persona",
+      ],
+      motion: [
+        "trigger_event",
+        "pain_hypothesis",
+        "offer_angle",
+        "message_variant",
+        "source_list",
+      ],
+    },
+    variants: [
+      { id: "variant_a", description: "Replace with first offer/message variant." },
+      { id: "variant_b", description: "Replace with second offer/message variant." },
+    ],
+    success_metrics: {
+      primary: ["qualified_meeting_booked"],
+      secondary: ["positive_reply", "opportunity_created"],
+    },
+    guardrails: {
+      min_rows_per_variant: 150,
+      min_field_coverage: 0.95,
+      require_crm_outcome_mapping: true,
+    },
+    agent_permissions: {
+      can_read: ["approved_context", "motion_evidence", "lead_metadata"],
+      can_propose: ["next_test", "crm_label_update"],
+      requires_approval: ["crm_writeback", "message_change", "campaign_pause"],
+    },
+  };
+}
+
+async function loadMotionContract(motionPath: string | undefined) {
+  if (!motionPath) {
+    throw new Error("Missing motion contract path. Example: trellis motion validate motions/ai_visibility_risk_q3.yaml");
+  }
+  const resolvedPath = path.resolve(process.cwd(), motionPath);
+  const source = await readFile(resolvedPath, "utf8");
+  const parsed = resolvedPath.endsWith(".json")
+    ? JSON.parse(source)
+    : parseYaml(source);
+  return {
+    contract: parseMotionContract(parsed),
+    resolvedPath,
+  };
+}
+
+async function readRowFlag(flags: Record<string, string | boolean>) {
+  const rowJson = readFlagString(flags, ["row", "json"]);
+  if (rowJson) {
+    return JSON.parse(rowJson) as Record<string, unknown>;
+  }
+  const rowPath = readFlagString(flags, ["row-file", "file"]);
+  if (rowPath) {
+    const rows = await readRowsFile(rowPath);
+    if (rows.length !== 1) {
+      throw new Error(`Expected exactly one row in ${rowPath}; got ${rows.length}`);
+    }
+    return rows[0]!;
+  }
+  throw new Error("Missing row. Use --row '{\"email\":\"...\"}' or --row-file ./row.json");
+}
+
+async function readRowsFile(inputPath: string) {
+  const resolvedPath = path.resolve(process.cwd(), inputPath);
+  const source = await readFile(resolvedPath, "utf8");
+  if (resolvedPath.endsWith(".json")) {
+    const parsed = JSON.parse(source);
+    return Array.isArray(parsed) ? parsed as Array<Record<string, unknown>> : [parsed as Record<string, unknown>];
+  }
+  if (resolvedPath.endsWith(".jsonl")) {
+    return source.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+  return parseCsv(source);
+}
+
+function parseCsv(source: string): Array<Record<string, string>> {
+  const rows = parseCsvRows(source).filter((row) => row.some((cell) => cell.trim().length > 0));
+  const [headers, ...records] = rows;
+  if (!headers || headers.length === 0) {
+    return [];
+  }
+  return records.map((record) => Object.fromEntries(headers.map((header, index) => [
+    header.trim(),
+    record[index]?.trim() ?? "",
+  ])));
+}
+
+function parseCsvRows(source: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      index += 1;
+      continue;
+    }
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (char === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") {
+        index += 1;
+      }
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function renderCsv(headers: string[], rows: Array<Record<string, unknown>>) {
+  return [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(",")),
+  ].join("\n") + "\n";
+}
+
+function csvEscape(value: unknown) {
+  const stringValue = value === null || value === undefined ? "" : String(value);
+  if (!/[",\n\r]/.test(stringValue)) {
+    return stringValue;
+  }
+  return `"${stringValue.replace(/"/g, '""')}"`;
+}
+
+function renderRequiredColumnsMarkdown(title: string, columns: string[]) {
+  return `# ${title}
+
+Add these columns/fields to the source workflow and propagate Trellis ID fields downstream.
+
+${columns.map((column) => `- \`${column}\``).join("\n")}
+`;
+}
+
+function renderMotionLaunchChecklist(pack: ReturnType<typeof compileMotionImplementationPack>) {
+  return `# Trellis Launch Checklist: ${pack.motion_id}
+
+Motion run: \`${pack.motion_run_id}\`
+
+## Before launch
+
+- [ ] Clay/source workflow includes every required column.
+- [ ] Row validation endpoint is configured: \`${pack.clay.http_api_endpoint}\`
+- [ ] Only certified rows are pushed downstream.
+- [ ] Sequencer custom fields include \`${pack.sequencer.required_propagated_fields.join("`, `")}\`.
+- [ ] CRM fields exist for Trellis IDs and success metrics.
+- [ ] Outcome mapping is documented and approved.
+- [ ] Human approval captured before send/launch.
+
+## Required downstream ID propagation
+
+${pack.sequencer.required_propagated_fields.map((field) => `- \`${field}\``).join("\n")}
+
+## After launch
+
+- [ ] Sync sequencer events into Trellis.
+- [ ] Sync CRM outcomes into Trellis.
+- [ ] Compile evidence pack.
+- [ ] Approve/reject learning candidates.
+`;
 }
 
 function parseCliArgs(values: string[]) {

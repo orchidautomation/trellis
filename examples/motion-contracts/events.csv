@@ -1,0 +1,3 @@
+event_type,enrollment_id,variant_id,source_system,raw_label
+positive_reply,,competitor_risk,smartlead,positive
+reply_received,,traffic_decline,smartlead,neutral

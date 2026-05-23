@@ -5,5 +5,8 @@
   "type": "module",
   "bin": {
     "trellis": "./src/cli.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.8.3"
   }
 }

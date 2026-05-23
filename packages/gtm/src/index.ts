@@ -1,4 +1,23 @@
 export { withTrellisRuntime } from "./hosted-runtime.js";
+export {
+  compileMotionEvidencePack,
+  compileMotionImplementationPack,
+  flattenRequiredFields,
+  getMotionRunId,
+  motionContractSchema,
+  parseMotionContract,
+  preflightMotionRun,
+  validateCandidateRow,
+  variantIds,
+  type CandidateRow,
+  type CandidateValidationResult,
+  type MotionContract,
+  type MotionEvent,
+  type MotionEvidencePack,
+  type MotionImplementationPack,
+  type MotionPreflightResult,
+  type RequiredFieldRef,
+} from "./motion-contracts.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import * as v from "valibot";

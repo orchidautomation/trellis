@@ -1,6 +1,33 @@
 # Trellis
 
-Trellis is a vertical GTM agent stack.
+Trellis is evolving into GTM engineering infrastructure for making revenue motions testable, governed, and learnable.
+
+## Trellis 2.0: Motion Contracts
+
+The new Trellis 2.0 primitive is the **Motion Contract**: a versioned spec for a GTM motion that captures the hypothesis, required fields, variants, success metrics, guardrails, agent permissions, and outcome mapping before launch.
+
+The practical loop:
+
+```bash
+npm run trellis -- motion init ai_visibility_risk_q3
+npm run trellis -- motion validate motions/ai_visibility_risk_q3.yaml
+npm run trellis -- motion compile motions/ai_visibility_risk_q3.yaml --targets clay,smartlead,hubspot
+npm run trellis -- motion preflight motions/ai_visibility_risk_q3.yaml --leads ./leads.csv
+npm run trellis -- motion evidence motions/ai_visibility_risk_q3.yaml --enrollments ./leads.csv --events ./events.csv --outcomes ./outcomes.csv
+```
+
+Trellis 2.0 owns the contract, preflight, ID propagation, evidence pack, learning ledger, and agent-safe context. Clay, Smartlead/Instantly, HubSpot/Salesforce, and other GTM systems remain the workbench/execution/source-of-record tools.
+
+Read the initial specs:
+
+- [`docs/trellis-2/motion-contracts.md`](./docs/trellis-2/motion-contracts.md)
+- [`docs/trellis-2/architecture.md`](./docs/trellis-2/architecture.md)
+- [`docs/trellis-2/pricing-and-validation.md`](./docs/trellis-2/pricing-and-validation.md)
+- [`examples/motion-contracts/`](./examples/motion-contracts/)
+
+## Original Trellis Agent Stack
+
+Trellis is also a vertical GTM agent stack.
 
 It is not trying to be a universal agent framework. Trellis is one curated path for shipping reliable GTM agents: Trellis owns the GTM product contract, runtime, state, workflows, approvals, provider actions, and observability surface.
 
